@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+config.json
+credentials*.json
+*.har
+*.ics
+downloads/
+snapshots/
+.DS_Store

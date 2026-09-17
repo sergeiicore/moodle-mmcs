@@ -545,6 +545,30 @@ def in_period(start, end, timestamp, duration=0):
     return start.timestamp() <= timestamp < end.timestamp() or (timestamp < start.timestamp() < timestamp + int(duration or 0))
 
 
+def stale_deadline_in_period(start, end, timestamp):
+    """Project an old Moodle date onto each year touched by a requested period.
+
+    Moodle courses are often reused without changing a due-date year. The
+    projection is only a candidate for a current deadline: callers retain the
+    source timestamp and must not present it as a confirmed Moodle date.
+    """
+    try:
+        source = dt.datetime.fromtimestamp(int(timestamp), start.tzinfo)
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+    current_year = dt.datetime.now(start.tzinfo).year
+    if source.year >= current_year:
+        return None
+    for year in range(start.year, end.year + 1):
+        try:
+            projected = source.replace(year=year)
+        except ValueError:  # February 29 in a non-leap year has no exact annual match.
+            continue
+        if start <= projected < end:
+            return projected
+    return None
+
+
 def list_events(api, args):
     start, end = period(args)
     courses = [api.select_course(args.course)] if args.course else api.courses()
@@ -557,7 +581,8 @@ def list_events(api, args):
               and (not args.course or e.get("courseid") in ids)]
     overview = {"period": {"from_inclusive": start.isoformat(), "to_exclusive": end.isoformat(), "timezone": args.timezone},
                 "courses": [{"id": c["id"], "name": c["fullname"]} for c in courses], "events": events,
-                "tasks": [], "without_deadline": [], "old_dates": [], "deadline_unverified": [],
+                "tasks": [], "without_deadline": [], "old_dates": [], "stale_deadline_candidates": [],
+                "deadline_unverified": [],
                 "calendar_available": calendar is not None, "course_inventory_checked": not args.calendar_only,
                 "deadline_module_types_checked": sorted(DEADLINES), "other_activities": []}
     index = {}
@@ -592,8 +617,17 @@ def list_events(api, args):
                         overview["without_deadline"].append(task)
                     elif due and in_period(start, end, due):
                         overview["tasks"].append(task)
-                    elif due and dt.datetime.fromtimestamp(due, start.tzinfo).year < dt.datetime.now(start.tzinfo).year:
-                        overview["old_dates"].append(task)
+                    elif due:
+                        source_date = dt.datetime.fromtimestamp(due, start.tzinfo)
+                        if source_date.year < dt.datetime.now(start.tzinfo).year:
+                            overview["old_dates"].append(task)
+                            projected = stale_deadline_in_period(start, end, due)
+                            if projected:
+                                candidate = {**task,
+                                    "stale_deadline_source_local": source_date.isoformat(),
+                                    "stale_deadline_projected_local": projected.isoformat(),
+                                    "stale_deadline_note": "Год срока в Moodle устарел; совпадение дня и месяца с запрошенным периодом не подтверждает срок."}
+                                overview["stale_deadline_candidates"].append(candidate)
     for event in events:
         task = index.get((event.get("modulename"), event.get("instance")))
         if task:
@@ -603,6 +637,7 @@ def list_events(api, args):
             event["task_details"] = task
     overview["events"].sort(key=lambda e: e.get("timestart", 0))
     overview["tasks"].sort(key=lambda e: e.get("deadline", 0))
+    overview["stale_deadline_candidates"].sort(key=lambda e: e.get("stale_deadline_projected_local", ""))
     return enrich(overview)
 
 
